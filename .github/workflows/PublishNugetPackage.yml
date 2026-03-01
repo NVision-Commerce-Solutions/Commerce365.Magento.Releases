@@ -1,8 +1,7 @@
 name: Publish Release ZIP as GitHub NuGet
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
