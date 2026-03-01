@@ -1,4 +1,4 @@
-name: Publish latest Release ZIP as GitHub NuGet
+name: Publish latest Release ZIP as GitHub NuGet (Org feed)
 
 on:
   workflow_dispatch:
@@ -40,10 +40,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "staging\release" | Out-Null
 
-          gh release download "$env:TAG" `
-            --repo "$env:GITHUB_REPOSITORY" `
-            --pattern "*.zip" `
-            --dir "staging\release"
+          gh release download "$env:TAG" --repo "$env:GITHUB_REPOSITORY" --pattern "*.zip" --dir "staging\release"
 
           $zips = Get-ChildItem "staging\release" -Filter *.zip
           if ($zips.Count -eq 0) { throw "No .zip assets found on release $env:TAG." }
@@ -71,29 +68,19 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
 
-          nuget pack "nuget\Commerce365.Magento.nuspec" `
-            -Version "$env:VERSION" `
-            -BasePath "$env:GITHUB_WORKSPACE" `
-            -OutputDirectory "artifacts"
+          nuget pack "nuget\Commerce365.Magento.nuspec" -Version "$env:VERSION" -BasePath "$env:GITHUB_WORKSPACE" -OutputDirectory "artifacts"
 
-      - name: Push to GitHub Packages
+      - name: Push to GitHub Packages (Organisation feed)
         shell: pwsh
         env:
-          SOURCE: "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-          API_KEY: ${{ secrets.GITHUB_TOKEN }}
-          OWNER: ${{ github.repository_owner }}
+          ORG: "NVision-Commerce-Solutions"
+          API_KEY: ${{ secrets.GHTOKENWORKFLOW }}
         run: |
-          nuget sources Remove -Name "github" -NonInteractive -ErrorAction SilentlyContinue | Out-Null
+          if (-not $env:API_KEY) { throw "Missing secret GHTOKENWORKFLOW." }
 
-          nuget sources Add `
-            -Name "github" `
-            -Source "$env:SOURCE" `
-            -UserName "$env:OWNER" `
-            -Password "$env:API_KEY" `
-            -StorePasswordInClearText `
-            -NonInteractive
+          $source = "https://nuget.pkg.github.com/$env:ORG/index.json"
 
-          nuget push "artifacts\*.nupkg" `
-            -Source "github" `
-            -ApiKey "$env:API_KEY" `
-            -SkipDuplicate
+          nuget sources Remove -Name "github-org" -NonInteractive -ErrorAction SilentlyContinue | Out-Null
+          nuget sources Add -Name "github-org" -Source "$source" -UserName "$env:ORG" -Password "$env:API_KEY" -StorePasswordInClearText -NonInteractive
+
+          nuget push "artifacts\*.nupkg" -Source "github-org" -ApiKey "$env:API_KEY" -SkipDuplicate
