@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package>
+  <metadata>
+    <id>Commerce365.Magento</id>
+    <version>$version$</version>
+    <authors>NVision Commerce Solutions B.V.</authors>
+    <description>Business Central runtime .app packages for Commerce 365 for Magento.</description>
+    <repository type="git" url="https://github.com/NVision-Commerce-Solutions/Commerce365.Magento.Releases" />
+  </metadata>
+
+  <files>
+    <!-- Put extracted .app files into contentFiles so they are easy to retrieve -->
+    <file src="staging\**\*.app" target="contentFiles\any\any\" />
+    <!-- Optional: include the original zip too -->
+    <file src="staging\release\*.zip" target="contentFiles\any\any\release\" />
+  </files>
+</package>

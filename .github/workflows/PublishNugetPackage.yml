@@ -1,0 +1,78 @@
+name: Publish Release ZIP as GitHub NuGet
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  pack_and_push:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout (for nuspec)
+        uses: actions/checkout@v4
+
+      - name: Compute version from tag
+        id: v
+        shell: pwsh
+        run: |
+          $tag = "${env:GITHUB_REF_NAME}"
+          $version = $tag.TrimStart("v")   # v1.2.3 -> 1.2.3
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install GitHub CLI
+        uses: cli/cli@v2
+
+      - name: Download release asset zip
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          New-Item -ItemType Directory -Force -Path staging\release | Out-Null
+
+          # Download the first .zip asset attached to this release
+          gh release download "${env:GITHUB_REF_NAME}" `
+            --repo "${env:GITHUB_REPOSITORY}" `
+            --pattern "*.zip" `
+            --dir "staging\release"
+
+          $zips = Get-ChildItem "staging\release" -Filter *.zip
+          if ($zips.Count -eq 0) { throw "No .zip assets found on the release." }
+          if ($zips.Count -gt 1) { Write-Host "Multiple zips found; using the first: $($zips[0].Name)" }
+
+          $zipPath = $zips[0].FullName
+          New-Item -ItemType Directory -Force -Path staging\apps | Out-Null
+          Expand-Archive -Path $zipPath -DestinationPath staging\apps -Force
+
+          $apps = Get-ChildItem "staging\apps" -Recurse -Filter *.app
+          if ($apps.Count -eq 0) { throw "No .app files found inside the zip." }
+          Write-Host "Found .app files:"
+          $apps | ForEach-Object { Write-Host " - $($_.FullName)" }
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Pack nupkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          nuget pack .\nuget\BCApps.nuspec `
+            -Version "${{ steps.v.outputs.version }}" `
+            -OutputDirectory .\artifacts
+
+      - name: Push to GitHub Packages
+        shell: pwsh
+        run: |
+          $source = "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+          nuget sources Remove -Name "github" -NonInteractive -ErrorAction SilentlyContinue | Out-Null
+          nuget sources Add -Name "github" -Source $source `
+            -UserName "${{ github.repository_owner }}" `
+            -Password "${{ secrets.GITHUB_TOKEN }}" `
+            -StorePasswordInClearText
+
+          nuget push ".\artifacts\*.nupkg" -Source "github" -ApiKey "${{ secrets.GITHUB_TOKEN }}" -SkipDuplicate
