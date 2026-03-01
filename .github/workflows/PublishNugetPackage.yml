@@ -12,7 +12,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout (for nuspec)
+      - name: Checkout repository (for nuspec)
         uses: actions/checkout@v4
 
       - name: Resolve latest release tag + version
@@ -21,11 +21,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # "gh release view" without a tag targets the latest release
           $tag = (gh release view --repo "$env:GITHUB_REPOSITORY" --json tagName -q ".tagName").Trim()
           if (-not $tag) { throw "Unable to determine latest release tag." }
 
-          $version = $tag.TrimStart("v")   # v1.2.3 -> 1.2.3
+          $version = $tag.TrimStart("v")
+
           Write-Host "Latest release tag: $tag"
           Write-Host "NuGet version:      $version"
 
@@ -40,21 +40,23 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "staging\release" | Out-Null
 
-          # Download zip assets from the resolved latest release
-          gh release download "$env:TAG" --repo "$env:GITHUB_REPOSITORY" --pattern "*.zip" --dir "staging\release"
+          gh release download "$env:TAG" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --pattern "*.zip" `
+            --dir "staging\release"
 
           $zips = Get-ChildItem "staging\release" -Filter *.zip
-          if ($zips.Count -eq 0) { throw "No .zip assets found on the latest release ($env:TAG)." }
+          if ($zips.Count -eq 0) { throw "No .zip assets found on release $env:TAG." }
 
-          # If multiple zips exist, extract all of them (safe + predictable)
           New-Item -ItemType Directory -Force -Path "staging\apps" | Out-Null
+
           foreach ($zip in $zips) {
             Write-Host "Extracting: $($zip.Name)"
             Expand-Archive -Path $zip.FullName -DestinationPath "staging\apps" -Force
           }
 
           $apps = Get-ChildItem "staging\apps" -Recurse -Filter *.app
-          if ($apps.Count -eq 0) { throw "No .app files found after extracting zip(s) from release $env:TAG." }
+          if ($apps.Count -eq 0) { throw "No .app files found after extraction." }
 
           Write-Host "Found .app files:"
           $apps | ForEach-Object { Write-Host " - $($_.FullName)" }
@@ -62,14 +64,17 @@ jobs:
       - name: Setup NuGet
         uses: nuget/setup-nuget@v2
 
-      - name: Pack nupkg (from nuspec)
+      - name: Pack NuGet package
         shell: pwsh
         env:
           VERSION: ${{ steps.rel.outputs.version }}
         run: |
           New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
 
-          nuget pack "nuget\Commerce365.Magento.nuspec" -Version "$env:VERSION" -OutputDirectory "artifacts"
+          nuget pack "nuget\Commerce365.Magento.nuspec" `
+            -Version "$env:VERSION" `
+            -BasePath "$env:GITHUB_WORKSPACE" `
+            -OutputDirectory "artifacts"
 
       - name: Push to GitHub Packages
         shell: pwsh
@@ -79,6 +84,16 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           nuget sources Remove -Name "github" -NonInteractive -ErrorAction SilentlyContinue | Out-Null
-          nuget sources Add -Name "github" -Source "$env:SOURCE" -UserName "$env:OWNER" -Password "$env:API_KEY" -StorePasswordInClearText -NonInteractive
 
-          nuget push "artifacts\*.nupkg" -Source "github" -ApiKey "$env:API_KEY" -SkipDuplicate
+          nuget sources Add `
+            -Name "github" `
+            -Source "$env:SOURCE" `
+            -UserName "$env:OWNER" `
+            -Password "$env:API_KEY" `
+            -StorePasswordInClearText `
+            -NonInteractive
+
+          nuget push "artifacts\*.nupkg" `
+            -Source "github" `
+            -ApiKey "$env:API_KEY" `
+            -SkipDuplicate
