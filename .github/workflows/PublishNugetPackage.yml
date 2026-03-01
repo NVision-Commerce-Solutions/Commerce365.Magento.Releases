@@ -12,19 +12,17 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout (for nuspec)
+      - name: Checkout (for nuspec file)
         uses: actions/checkout@v4
 
       - name: Compute version from tag
-        id: v
+        id: version
         shell: pwsh
         run: |
           $tag = "${env:GITHUB_REF_NAME}"
           $version = $tag.TrimStart("v")   # v1.2.3 -> 1.2.3
+          Write-Host "Using version: $version"
           "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Install GitHub CLI
-        uses: cli/cli@v2
 
       - name: Download release asset zip
         shell: pwsh
@@ -33,7 +31,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path staging\release | Out-Null
 
-          # Download the first .zip asset attached to this release
           gh release download "${env:GITHUB_REF_NAME}" `
             --repo "${env:GITHUB_REPOSITORY}" `
             --pattern "*.zip" `
@@ -41,27 +38,52 @@ jobs:
 
           $zips = Get-ChildItem "staging\release" -Filter *.zip
           if ($zips.Count -eq 0) { throw "No .zip assets found on the release." }
-          if ($zips.Count -gt 1) { Write-Host "Multiple zips found; using the first: $($zips[0].Name)" }
+          if ($zips.Count -gt 1) { Write-Host "Multiple zips found; using first one." }
 
           $zipPath = $zips[0].FullName
+
           New-Item -ItemType Directory -Force -Path staging\apps | Out-Null
           Expand-Archive -Path $zipPath -DestinationPath staging\apps -Force
 
           $apps = Get-ChildItem "staging\apps" -Recurse -Filter *.app
           if ($apps.Count -eq 0) { throw "No .app files found inside the zip." }
+
           Write-Host "Found .app files:"
           $apps | ForEach-Object { Write-Host " - $($_.FullName)" }
 
       - name: Setup NuGet
         uses: nuget/setup-nuget@v2
 
+      - name: Create nuspec dynamically
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path nuget | Out-Null
+
+          $nuspec = @"
+<?xml version="1.0"?>
+<package>
+  <metadata>
+    <id>YourCompany.BusinessCentral.RuntimeApps</id>
+    <version>${{ steps.version.outputs.version }}</version>
+    <authors>YourCompany</authors>
+    <description>Business Central runtime .app packages from GitHub Release assets.</description>
+    <repository type="git" url="https://github.com/${{ github.repository }}" />
+  </metadata>
+  <files>
+    <file src="staging\apps\**\*.app" target="contentFiles\any\any\" />
+  </files>
+</package>
+"@
+
+          $nuspec | Out-File -FilePath nuget\package.nuspec -Encoding utf8
+
       - name: Pack nupkg
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          nuget pack .\nuget\BCApps.nuspec `
-            -Version "${{ steps.v.outputs.version }}" `
-            -OutputDirectory .\artifacts
+
+          nuget pack nuget\package.nuspec `
+            -OutputDirectory artifacts
 
       - name: Push to GitHub Packages
         shell: pwsh
@@ -69,9 +91,13 @@ jobs:
           $source = "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
 
           nuget sources Remove -Name "github" -NonInteractive -ErrorAction SilentlyContinue | Out-Null
-          nuget sources Add -Name "github" -Source $source `
+          nuget sources Add -Name "github" `
+            -Source $source `
             -UserName "${{ github.repository_owner }}" `
             -Password "${{ secrets.GITHUB_TOKEN }}" `
             -StorePasswordInClearText
 
-          nuget push ".\artifacts\*.nupkg" -Source "github" -ApiKey "${{ secrets.GITHUB_TOKEN }}" -SkipDuplicate
+          nuget push "artifacts\*.nupkg" `
+            -Source "github" `
+            -ApiKey "${{ secrets.GITHUB_TOKEN }}" `
+            -SkipDuplicate
