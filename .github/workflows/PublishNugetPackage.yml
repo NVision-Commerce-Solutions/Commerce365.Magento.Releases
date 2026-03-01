@@ -2,6 +2,10 @@ name: Publish Release ZIP as GitHub NuGet
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to package (e.g. v1.2.3)"
+        required: true
 
 permissions:
   contents: read
@@ -12,15 +16,15 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout (for nuspec file)
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Compute version from tag
         id: version
         shell: pwsh
         run: |
-          $tag = "${env:GITHUB_REF_NAME}"
-          $version = $tag.TrimStart("v")   # v1.2.3 -> 1.2.3
+          $tag = "${{ github.event.inputs.tag }}"
+          $version = $tag.TrimStart("v")
           Write-Host "Using version: $version"
           "version=$version" >> $env:GITHUB_OUTPUT
 
@@ -28,17 +32,18 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag }}
         run: |
           New-Item -ItemType Directory -Force -Path staging\release | Out-Null
 
-          gh release download "${env:GITHUB_REF_NAME}" `
+          gh release download "$env:TAG" `
             --repo "${env:GITHUB_REPOSITORY}" `
             --pattern "*.zip" `
             --dir "staging\release"
 
           $zips = Get-ChildItem "staging\release" -Filter *.zip
           if ($zips.Count -eq 0) { throw "No .zip assets found on the release." }
-          if ($zips.Count -gt 1) { Write-Host "Multiple zips found; using first one." }
+          if ($zips.Count -gt 1) { Write-Host "Multiple zips found; using first one: $($zips[0].Name)" }
 
           $zipPath = $zips[0].FullName
 
@@ -54,26 +59,31 @@ jobs:
       - name: Setup NuGet
         uses: nuget/setup-nuget@v2
 
-      - name: Create nuspec dynamically
+      - name: Create nuspec
         shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           New-Item -ItemType Directory -Force -Path nuget | Out-Null
 
-          $nuspec = @"
+          $nuspec = @'
 <?xml version="1.0"?>
 <package>
   <metadata>
     <id>YourCompany.BusinessCentral.RuntimeApps</id>
-    <version>${{ steps.version.outputs.version }}</version>
+    <version>__VERSION__</version>
     <authors>YourCompany</authors>
     <description>Business Central runtime .app packages from GitHub Release assets.</description>
-    <repository type="git" url="https://github.com/${{ github.repository }}" />
+    <repository type="git" url="https://github.com/__REPO__" />
   </metadata>
   <files>
     <file src="staging\apps\**\*.app" target="contentFiles\any\any\" />
   </files>
 </package>
-"@
+'@
+
+          $nuspec = $nuspec.Replace('__VERSION__', $env:VERSION)
+          $nuspec = $nuspec.Replace('__REPO__', $env:GITHUB_REPOSITORY)
 
           $nuspec | Out-File -FilePath nuget\package.nuspec -Encoding utf8
 
@@ -81,23 +91,23 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-
-          nuget pack nuget\package.nuspec `
-            -OutputDirectory artifacts
+          nuget pack nuget\package.nuspec -OutputDirectory artifacts
 
       - name: Push to GitHub Packages
         shell: pwsh
+        env:
+          SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+          API_KEY: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
         run: |
-          $source = "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-
           nuget sources Remove -Name "github" -NonInteractive -ErrorAction SilentlyContinue | Out-Null
           nuget sources Add -Name "github" `
-            -Source $source `
-            -UserName "${{ github.repository_owner }}" `
-            -Password "${{ secrets.GITHUB_TOKEN }}" `
+            -Source "$env:SOURCE" `
+            -UserName "$env:OWNER" `
+            -Password "$env:API_KEY" `
             -StorePasswordInClearText
 
           nuget push "artifacts\*.nupkg" `
             -Source "github" `
-            -ApiKey "${{ secrets.GITHUB_TOKEN }}" `
+            -ApiKey "$env:API_KEY" `
             -SkipDuplicate
