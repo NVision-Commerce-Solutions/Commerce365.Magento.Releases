@@ -1,12 +1,7 @@
-name: Publish Release ZIP as GitHub NuGet
+name: Publish latest Release ZIP as GitHub NuGet
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag (e.g. v1.2.3)"
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -17,46 +12,73 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (for nuspec)
+        uses: actions/checkout@v4
 
-      - name: Compute version from tag
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          $version = $tag.TrimStart("v")
-          "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Download release asset
+      - name: Resolve latest release tag + version
+        id: rel
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.inputs.tag }}
         run: |
-          New-Item -ItemType Directory -Force -Path staging\release | Out-Null
+          # "gh release view" without a tag targets the latest release
+          $tag = (gh release view --repo "$env:GITHUB_REPOSITORY" --json tagName -q ".tagName").Trim()
+          if (-not $tag) { throw "Unable to determine latest release tag." }
 
-          gh release download "$env:TAG" --repo "$env:GITHUB_REPOSITORY" --pattern "*.zip" --dir staging\release
+          $version = $tag.TrimStart("v")   # v1.2.3 -> 1.2.3
+          Write-Host "Latest release tag: $tag"
+          Write-Host "NuGet version:      $version"
 
-          $zip = Get-ChildItem staging\release -Filter *.zip | Select-Object -First 1
-          if (-not $zip) { throw "No zip asset found." }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
 
-          Expand-Archive $zip.FullName -DestinationPath staging\apps -Force
-
-      - uses: nuget/setup-nuget@v2
-
-      - name: Pack
-        shell: pwsh
-        run: |
-          nuget pack nuget\Commerce365.Magento.nuspec `
-            -Version "${{ steps.version.outputs.version }}" `
-            -OutputDirectory artifacts
-
-      - name: Push
+      - name: Download latest release zip asset(s)
         shell: pwsh
         env:
-          SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          New-Item -ItemType Directory -Force -Path "staging\release" | Out-Null
+
+          # Download zip assets from the resolved latest release
+          gh release download "$env:TAG" --repo "$env:GITHUB_REPOSITORY" --pattern "*.zip" --dir "staging\release"
+
+          $zips = Get-ChildItem "staging\release" -Filter *.zip
+          if ($zips.Count -eq 0) { throw "No .zip assets found on the latest release ($env:TAG)." }
+
+          # If multiple zips exist, extract all of them (safe + predictable)
+          New-Item -ItemType Directory -Force -Path "staging\apps" | Out-Null
+          foreach ($zip in $zips) {
+            Write-Host "Extracting: $($zip.Name)"
+            Expand-Archive -Path $zip.FullName -DestinationPath "staging\apps" -Force
+          }
+
+          $apps = Get-ChildItem "staging\apps" -Recurse -Filter *.app
+          if ($apps.Count -eq 0) { throw "No .app files found after extracting zip(s) from release $env:TAG." }
+
+          Write-Host "Found .app files:"
+          $apps | ForEach-Object { Write-Host " - $($_.FullName)" }
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Pack nupkg (from nuspec)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
+
+          nuget pack "nuget\Commerce365.Magento.nuspec" -Version "$env:VERSION" -OutputDirectory "artifacts"
+
+      - name: Push to GitHub Packages
+        shell: pwsh
+        env:
+          SOURCE: "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
           API_KEY: ${{ secrets.GITHUB_TOKEN }}
           OWNER: ${{ github.repository_owner }}
         run: |
-          nuget sources Add -Name github -Source "$env:SOURCE" -UserName "$env:OWNER" -Password "$env:API_KEY" -StorePasswordInClearText -NonInteractive
-          nuget push "artifacts\*.nupkg" -Source github -ApiKey "$env:API_KEY" -SkipDuplicate
+          nuget sources Remove -Name "github" -NonInteractive -ErrorAction SilentlyContinue | Out-Null
+          nuget sources Add -Name "github" -Source "$env:SOURCE" -UserName "$env:OWNER" -Password "$env:API_KEY" -StorePasswordInClearText -NonInteractive
+
+          nuget push "artifacts\*.nupkg" -Source "github" -ApiKey "$env:API_KEY" -SkipDuplicate
